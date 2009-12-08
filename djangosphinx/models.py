@@ -306,7 +306,9 @@ class SphinxQuerySet(object):
                 v = list(v)
             elif not (isinstance(v, list) or isinstance(v, tuple)):
                  v = [v,]
-            filters.setdefault(k, []).extend(map(to_sphinx, v))
+            # change extend to append
+            # this make multiple filters on the same attribute behave like "and" not "or" 
+            filters.setdefault(k, []).append(map(to_sphinx, v))
         return self._clone(_filters=filters)
 
     def geoanchor(self, lat_attr, lng_attr, lat, lng):
@@ -414,52 +416,54 @@ class SphinxQuerySet(object):
         client.SetMatchMode(self._mode)
         
         def _handle_filters(filter_list, exclude=False):
-            for name, values in filter_list.iteritems():
-                parts = len(name.split('__'))
-                if parts > 2:
-                    raise NotImplementedError, 'Related object and/or multiple field lookups not supported'
-                elif parts == 2:
-                    # The float handling for __gt and __lt is kind of ugly..
-                    name, lookup = name.split('__', 1)
-                    is_float = isinstance(values[0], float)
-                    if lookup in ('gt', 'gte'):
-                        value = values[0]
-                        if lookup == 'gt':
+            for name, filter_values in filter_list.iteritems():
+                # multiple filters on the same attribute behave like "and" not "or"
+                for values in filter_values if not exclude else [filter_values,]:
+                    parts = len(name.split('__'))
+                    if parts > 2:
+                        raise NotImplementedError, 'Related object and/or multiple field lookups not supported'
+                    elif parts == 2:
+                        # The float handling for __gt and __lt is kind of ugly..
+                        name, lookup = name.split('__', 1)
+                        is_float = isinstance(values[0], float)
+                        if lookup in ('gt', 'gte'):
+                            value = values[0]
+                            if lookup == 'gt':
+                                if is_float:
+                                    value += (1.0/MAX_INT)
+                                else:
+                                    value += 1
+                            _max = MAX_INT
                             if is_float:
-                                value += (1.0/MAX_INT)
-                            else:
-                                value += 1
-                        _max = MAX_INT
-                        if is_float:
-                            _max = float(_max)
-                        args = (name, value, _max, exclude)
-                    elif lookup in ('lt', 'lte'):
-                        value = values[0]
-                        if lookup == 'lt':
+                                _max = float(_max)
+                            args = (name, value, _max, exclude)
+                        elif lookup in ('lt', 'lte'):
+                            value = values[0]
+                            if lookup == 'lt':
+                                if is_float:
+                                    value -= (1.0/MAX_INT)
+                                else:
+                                    value -= 1
+                            _max = -MAX_INT
                             if is_float:
-                                value -= (1.0/MAX_INT)
-                            else:
-                                value -= 1
-                        _max = -MAX_INT
+                                _max = float(_max)
+                            args = (name, _max, value, exclude)
+                        elif lookup == 'in':
+                            args = (name, values, exclude)
+                        elif lookup == 'range':
+                            args = (name, values[0], values[1], exclude)
+                        else:
+                            raise NotImplementedError, 'Related object and/or field lookup "%s" not supported' % lookup
                         if is_float:
-                            _max = float(_max)
-                        args = (name, _max, value, exclude)
-                    elif lookup == 'in':
-                        args = (name, values, exclude)
-                    elif lookup == 'range':
-                        args = (name, values[0], values[1], exclude)
+                            client.SetFilterFloatRange(*args)
+                        elif not exclude and self.model and name == self.model._meta.pk.column:
+                            client.SetIDRange(*args[1:3])
+                        elif lookup == 'in':
+                            client.SetFilter(name, values, exclude)
+                        else:
+                            client.SetFilterRange(*args)
                     else:
-                        raise NotImplementedError, 'Related object and/or field lookup "%s" not supported' % lookup
-                    if is_float:
-                        client.SetFilterFloatRange(*args)
-                    elif not exclude and self.model and name == self.model._meta.pk.column:
-                        client.SetIDRange(*args[1:3])
-                    elif lookup == 'in':
                         client.SetFilter(name, values, exclude)
-                    else:
-                        client.SetFilterRange(*args)
-                else:
-                    client.SetFilter(name, values, exclude)
 
         # Include filters
         if self._filters:
